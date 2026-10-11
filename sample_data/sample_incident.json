@@ -1,0 +1,5 @@
+{
+  "description": "Checkout pricing service reports KeyError during discount calculation. Production stack trace:\nTraceback (most recent call last):\n  File \"pricing.py\", line 8, in apply_discount\n    return item[\"price\"] * (1 - discount_pct / 100)\nKeyError: 'price'\nSome checkout items are missing pricing information.",
+  "service_name": "pricing-service",
+  "telemetry_source": "sentry"
+}
