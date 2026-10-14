@@ -17,7 +17,8 @@ import { ExecutionLog } from "@/components/ExecutionLog";
 import { IncidentComposer } from "@/components/IncidentComposer";
 import { ModelStatus } from "@/components/ModelStatus";
 import { ResultDashboard } from "@/components/ResultDashboard";
-import { api, type Health, type Report, websocketUrl } from "@/lib/api";
+import { OperationalMetricsPanel } from "@/components/OperationalMetrics";
+import { api, type Health, type OperationalMetrics, type Report, websocketUrl } from "@/lib/api";
 import type { LogEvent } from "@/lib/types";
 
 const POLL_INTERVAL = 3000;
@@ -28,6 +29,8 @@ export default function Home() {
   const [source, setSource] = useState("sentry");
   const [repo, setRepo] = useState<File | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
+  const [metrics, setMetrics] = useState<OperationalMetrics | null>(null);
+  const [progressPct, setProgressPct] = useState(0);
   const [logs, setLogs] = useState<LogEvent[]>([]);
   const [report, setReport] = useState<Report | null>(null);
   const [activeStage, setActiveStage] = useState("");
@@ -48,6 +51,7 @@ export default function Home() {
     } catch {
       setHealth(null);
     }
+    try { setMetrics(await api.metrics()); } catch { setMetrics(null); }
   }, []);
 
   useEffect(() => {
@@ -119,6 +123,8 @@ export default function Home() {
         try {
           const current = await api.status(id);
           const status = current.status;
+          const stageProgress: Record<string, number> = { submitted: 0, parsing: 20, forensics: 40, reproducing: 60, patching: 80, verifying: 95, patch_ready: 100, resolved: 100 };
+          setProgressPct(stageProgress[status] ?? 0);
 
           if (status === "parsing") {
             setActiveStage("telemetry_parser");
@@ -215,6 +221,7 @@ export default function Home() {
               if (data.current_stage) {
                 setActiveStage(data.current_stage);
               }
+              if (typeof data.progress_pct === "number") setProgressPct(Math.max(0, Math.min(100, data.progress_pct)));
 
               if (data.event === "complete") {
                 void finishWithReport(id);
@@ -274,6 +281,7 @@ export default function Home() {
     setLogs([]);
     setReport(null);
     setActiveStage("");
+    setProgressPct(0);
     setRunning(false);
     setError("");
     setView("compose");
@@ -298,6 +306,7 @@ export default function Home() {
     setReport(null);
     setLogs([]);
     setActiveStage("telemetry_parser");
+    setProgressPct(0);
     setView("run");
 
     try {
@@ -331,6 +340,7 @@ export default function Home() {
     setReport(null);
     setLogs([]);
     setActiveStage("telemetry_parser");
+    setProgressPct(0);
     setView("run");
 
     try {
@@ -512,6 +522,7 @@ export default function Home() {
             <div className="mt-6">
               <ModelStatus health={health} />
             </div>
+            <div className="mt-5"><OperationalMetricsPanel metrics={metrics} /></div>
           </>
         )}
 
@@ -529,6 +540,7 @@ export default function Home() {
             <div className="mt-5">
               <ExecutionLog logs={logs} />
             </div>
+            <div className="mt-5"><OperationalMetricsPanel metrics={metrics} /></div>
 
             {view === "run" && running && (
               <div className="mt-5 rounded-2xl border border-indigo-500/15 bg-indigo-500/[.035] p-7 text-center">
@@ -538,6 +550,10 @@ export default function Home() {
                   Investigation in progress
                 </div>
 
+                <div className="mt-4 h-2 overflow-hidden rounded-full bg-white/[.08]" role="progressbar" aria-valuenow={progressPct} aria-valuemin={0} aria-valuemax={100} aria-label="Investigation progress">
+                  <div className="h-full rounded-full bg-indigo-400 transition-all duration-500" style={{ width: `${progressPct}%` }} />
+                </div>
+                <div className="mt-1 text-right text-xs text-zinc-400">{progressPct}%</div>
                 <div className="mt-2 text-sm text-zinc-300">
                   Current stage:{" "}
                   <span className="font-medium capitalize text-indigo-300">

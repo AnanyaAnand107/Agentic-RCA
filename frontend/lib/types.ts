@@ -9,5 +9,6 @@ export type LogEvent = {
   event?: string;
   current_stage?: string;
   progress_pct?: number;
+  timestamp?: string;
   log: string;
 };

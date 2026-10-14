@@ -25,7 +25,7 @@ export function ExecutionLog({ logs }: { logs: LogEvent[] }) {
                 [{entry.current_stage || "system"}]
               </span>
 
-              <span className="break-words text-zinc-200">{entry.log}</span>
+              <span className={`break-words ${entry.event === "error" ? "text-red-200" : entry.event === "warning" ? "text-amber-200" : "text-zinc-200"}`}>{entry.log}</span>
             </div>
           ))
         )}

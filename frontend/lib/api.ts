@@ -59,6 +59,11 @@ export type Report = {
   models: Record<string, string | null>;
 };
 
+export type OperationalMetrics = {
+  total_agent_runs: number;
+  agent_metrics: Record<string, { runs: number; failures: number; avg_latency_ms: number; failure_rate: number; models: Record<string, number> }>;
+};
+
 export type Health = {
   status: string;
   service: string;
@@ -74,6 +79,7 @@ export type Health = {
 
 export const api = {
   health: () => request<Health>("/api/health"),
+  metrics: () => request<OperationalMetrics>("/api/metrics"),
   createIncident: (description: string, telemetry_source: string) =>
     request<Incident>("/api/incidents", {
       method: "POST",
