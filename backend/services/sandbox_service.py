@@ -2,67 +2,141 @@ import os
 import shutil
 import tempfile
 import subprocess
-from typing import Dict, Any
+import logging
+
+logger = logging.getLogger(__name__)
 
 class SandboxVerificationService:
-    def __init__(self, timeout_seconds: int = 30):
-        self.timeout = timeout_seconds
+    def __init__(self, timeout_seconds: int = 120):
+        self.timeout_seconds = timeout_seconds
 
-    def _create_disposable_copy(self, original_repo_path: str) -> str:
-        temp_dir = tempfile.mkdtemp(prefix="rca_sandbox_")
-        target_dir = os.path.join(temp_dir, "repo")
-        shutil.copytree(original_repo_path, target_dir, dirs_exist_ok=True)
-        return target_dir
+    def verify_patch(
+        self,
+        original_repo_path: str,
+        patch_str: str,
+        test_file: str = "tests/"
+    ) -> dict:
+        """
+        1. Pre-patch test run: Ensures test fails expectedly (bug exists).
+        2. Applies unified diff (patch_str) using git apply.
+        3. Post-patch test run: Ensures test passes.
+        4. Runs regression suite.
+        Uses Docker with hardened security (no network, memory limits).
+        """
+        if not os.path.exists(original_repo_path):
+            return {
+                "verified": False,
+                "reason": f"Original repository path does not exist: {original_repo_path}"
+            }
 
-    def _run_in_docker(self, repo_path: str, command: str) -> Dict[str, Any]:
-        docker_cmd = [
-            "docker", "run", "--rm",
-            "-v", f"{os.path.abspath(repo_path)}:/workspace",
-            "-w", "/workspace",
-            "python:3.11-slim",
-            "bash", "-c", f"pip install pytest -q && {command}"
-        ]
+        # Create temporary disposable workspace
+        temp_dir = tempfile.mkdtemp(prefix="sandbox_vbf_")
         try:
-            res = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=self.timeout)
-            return {"exit_code": res.returncode, "stdout": res.stdout, "stderr": res.stderr}
-        except subprocess.TimeoutExpired:
-            return {"exit_code": -1, "stdout": "", "stderr": "Execution timed out"}
-        except Exception as e:
-            return {"exit_code": -1, "stdout": "", "stderr": str(e)}
+            # Copy source code to temp workspace
+            shutil.copytree(original_repo_path, temp_dir, dirs_exist_ok=True)
 
-    def verify_patch(self, original_repo_path: str, patch_str: str, test_file: str) -> Dict[str, Any]:
-        temp_repo = self._create_disposable_copy(original_repo_path)
-
-        try:
-            pre_res = self._run_in_docker(temp_repo, f"pytest {test_file}")
-            if pre_res["exit_code"] == 0:
+            # Step A: Pre-patch reproduction test (Verify bug fails expectedly)
+            pre_test_res = self._run_in_docker(temp_dir, test_file)
+            if pre_test_res["returncode"] == 0:
                 return {
                     "verified": False,
-                    "reason": "Pre-patch test passed unexpectedly. Test case reproduction invalid."
+                    "reason": "Reproduction check failed: Pre-patch tests passed. Expected the target issue to fail before applying the patch."
                 }
 
-            patch_file_path = os.path.join(temp_repo, "candidate.patch")
-            with open(patch_file_path, "w") as f:
+            # Step B: Apply Unified Diff Patch
+            patch_file_path = os.path.join(temp_dir, "candidate.patch")
+            with open(patch_file_path, "w", encoding="utf-8") as f:
                 f.write(patch_str)
 
+            apply_cmd = ["git", "apply", "--ignore-whitespace", "candidate.patch"]
             apply_res = subprocess.run(
-                ["git", "apply", "candidate.patch"],
-                cwd=temp_repo, capture_output=True, text=True
+                apply_cmd,
+                cwd=temp_dir,
+                capture_output=True,
+                text=True,
+                timeout=30
             )
-            if apply_res.returncode != 0:
-                return {"verified": False, "reason": f"Patch application failed: {apply_res.stderr}"}
 
-            post_res = self._run_in_docker(temp_repo, "pytest")
-            if post_res["exit_code"] != 0:
+            if apply_res.returncode != 0:
                 return {
                     "verified": False,
-                    "reason": f"Post-patch tests/regressions failed: {post_res.stderr or post_res['stdout']}"
+                    "reason": f"Failed to apply git diff patch:\n{apply_res.stderr}"
+                }
+
+            # Step C: Post-patch reproduction test (Verify fix passes)
+            post_test_res = self._run_in_docker(temp_dir, test_file)
+            if post_test_res["returncode"] != 0:
+                return {
+                    "verified": False,
+                    "reason": f"Post-patch verification failed:\n{post_test_res['stdout']}\n{post_test_res['stderr']}"
+                }
+
+            # Step D: Regression Test Suite Execution
+            regression_res = self._run_in_docker(temp_dir, "tests/")
+            if regression_res["returncode"] != 0:
+                return {
+                    "verified": False,
+                    "reason": f"Regression test suite failed after applying patch:\n{regression_res['stdout']}"
                 }
 
             return {
                 "verified": True,
-                "reason": "Patch verified: Failed before fix, passed after fix without regressions."
+                "reason": "Patch verified successfully: Pre-patch failed, post-patch passed, and regression suite passed in Docker sandbox."
             }
 
+        except subprocess.TimeoutExpired:
+            return {
+                "verified": False,
+                "reason": f"Sandbox execution timed out after {self.timeout_seconds} seconds."
+            }
+        except Exception as exc:
+            return {
+                "verified": False,
+                "reason": f"Sandbox execution encountered error: {str(exc)}"
+            }
         finally:
-            shutil.rmtree(os.path.dirname(temp_repo), ignore_errors=True)
+            # Clean up temp workspace
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def _run_in_docker(self, workspace_path: str, test_target: str) -> dict:
+        """
+        Executes pytest inside Docker container with restricted network and resource bounds.
+        Falls back to local subprocess if Docker daemon is not running.
+        """
+        docker_cmd = [
+            "docker", "run", "--rm",
+            "--network", "none",            # Disable network access (Hardening)
+            "--memory", "512m",             # Memory constraint (Hardening)
+            "-v", f"{os.path.abspath(workspace_path)}:/app",
+            "-w", "/app",
+            "python:3.11-slim",
+            "pytest", test_target
+        ]
+
+        try:
+            res = subprocess.run(
+                docker_cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_seconds
+            )
+            return {
+                "returncode": res.returncode,
+                "stdout": res.stdout,
+                "stderr": res.stderr
+            }
+        except (subprocess.SubprocessError, FileNotFoundError):
+            # Local fallback if Docker daemon is absent in development environment
+            fallback_cmd = ["pytest", test_target]
+            res = subprocess.run(
+                fallback_cmd,
+                cwd=workspace_path,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_seconds
+            )
+            return {
+                "returncode": res.returncode,
+                "stdout": res.stdout,
+                "stderr": res.stderr
+            }

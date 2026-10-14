@@ -5,9 +5,6 @@ import json
 from backend.agents.state import AgentState
 from backend.services.sandbox_service import SandboxVerificationService
 from backend.services.github_service import GitHubService
-# from backend.agents.state import AgentState
-# from ..services.sandbox_service import SandboxVerificationService
-# from ..services.github_service import GitHubService
 
 MAX_REFLECTIONS = 1
 
@@ -15,10 +12,12 @@ MAX_REFLECTIONS = 1
 def verification(state: AgentState) -> AgentState:
     patched = state.get("patched_code", "")
     patch_file = state.get("patch_file", "")
+    diff_text = state.get("diff_text", "") or state.get("patch_diff", "")
     count = int(state.get("reflection_count", 0) or 0)
-    repo_path = state.get("repository_path", ".")
+    
+    repo_path = state.get("repo_path", ".")
     incident_id = state.get("incident_id", "demo-incident")
-    test_file = state.get("test_file", "tests/")
+    test_file = state.get("test_file_name", "tests/")
     logs: list[str] = []
 
     # 1. Verification stop if no patch present
@@ -27,14 +26,14 @@ def verification(state: AgentState) -> AgentState:
             "verification_passed": None,
             "regression_passed": None,
             "verification_mode": "pre_isolation",
-            "verification_feedback": "No candidate patch was produced.",
+            "verification_feedback": "No candidate patch or diff was produced.",
             "needs_reflection": False,
             "current_stage": "verification",
             "stage_logs": ["verification stopped: no candidate patch"],
         }
 
     # 2. Static AST Syntax Check
-    if patch_file.endswith(".py"):
+    if patched and patch_file.endswith(".py"):
         try:
             ast.parse(patched)
             logs.append("candidate Python source parses successfully")
@@ -55,10 +54,11 @@ def verification(state: AgentState) -> AgentState:
             }
 
     # 3. Dynamic Isolation Check via Sandbox Service (Docker + Disposable Copy)
+    patch_payload = diff_text if diff_text else patched
     sandbox = SandboxVerificationService()
     sandbox_res = sandbox.verify_patch(
         original_repo_path=repo_path,
-        patch_str=patched,
+        patch_str=patch_payload,
         test_file=test_file
     )
 
@@ -94,7 +94,7 @@ def verification(state: AgentState) -> AgentState:
     github_svc = GitHubService()
     pr_res = github_svc.create_pull_request(
         incident_id=incident_id,
-        patch_str=patched,
+        patch_str=patch_payload,
         forensic_evidence=state.get("root_cause_explanation", "Forensic analysis completed."),
         verification_summary=test_output
     )
