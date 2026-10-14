@@ -9,6 +9,8 @@ import shutil
 import zipfile
 from pathlib import Path
 import asyncio
+import time
+from fastapi import Request, Header
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from sqlalchemy import select
@@ -28,6 +30,7 @@ from backend.database import (
     get_db,
 )
 from backend.llm import model_status
+from backend.observability import audit, metric, metrics_summary, sentry_secret_valid, trace_context
 from backend.schemas import (
     IncidentCreate,
     IncidentResponse,
@@ -110,6 +113,7 @@ async def create_incident(data: IncidentCreate, db: AsyncSession = Depends(get_d
     db.add(incident)
     await db.commit()
     await db.refresh(incident)
+    await audit("incident.created", incident.id, {"source": data.telemetry_source or "unknown"})
     return incident
 
 
@@ -188,6 +192,7 @@ async def delete_incident(id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Incident not found")
     workspace = WORKSPACE_ROOT / id
     shutil.rmtree(workspace, ignore_errors=True)
+    await audit("incident.deleted", id)
     await db.delete(incident)
     await db.commit()
     return {"status": "deleted"}
@@ -216,6 +221,7 @@ async def run_pipeline_task(incident_id: str):
                 "description": incident.description,
                 "repo_path": str(repo_path),
                 "telemetry_source": incident.service_name or "unknown",
+                "otel_context": (incident.telemetry_context or {}).get("otel_context", {}),
                 "stage_logs": [],
                 "messages": [],
             }
@@ -237,6 +243,8 @@ async def run_pipeline_task(incident_id: str):
                 "name": "telemetry_parser",
                 "pct": 0,
             }
+            stage_started = time.perf_counter()
+            last_stage = None
 
             heartbeat_running = True
 
@@ -268,6 +276,14 @@ async def run_pipeline_task(incident_id: str):
             try:
                 async for chunk in graph.astream(initial_state):
                     for node_name, state_update in chunk.items():
+                        now = time.perf_counter()
+                        if last_stage is not None:
+                            stage_model = (final_state.get("reproduction_model") if last_stage == "reproduction" else final_state.get("patch_model") if last_stage == "patch_synthesizer" else None)
+                            stage_usage = final_state.get("model_usage", {})
+                            await metric(incident_id, last_stage, (now - stage_started) * 1000, "success",
+                                         model=stage_model, usage=stage_usage if isinstance(stage_usage, dict) else {})
+                        last_stage = node_name
+                        stage_started = now
                         current_stage["name"] = node_name
                         current_stage["pct"] = STAGE_PCT.get(
                             node_name,
@@ -298,6 +314,8 @@ async def run_pipeline_task(incident_id: str):
                             )
 
                         if state_update.get("error"):
+                            await metric(incident_id, node_name, (time.perf_counter() - stage_started) * 1000, "failure")
+                            last_stage = None
                             await manager.broadcast(
                                 incident_id,
                                 {
@@ -463,6 +481,11 @@ async def run_pipeline_task(incident_id: str):
                     )
                 )
 
+            if last_stage is not None:
+                await metric(incident_id, last_stage, (time.perf_counter() - stage_started) * 1000, "success",
+                             model=(final_state.get("reproduction_model") if last_stage == "reproduction" else final_state.get("patch_model") if last_stage == "patch_synthesizer" else None),
+                             usage=final_state.get("model_usage", {}) if isinstance(final_state.get("model_usage", {}), dict) else {})
+
             incident.status = (
                 IncidentStatus.resolved
                 if final_state.get("verification_passed") is True
@@ -470,6 +493,7 @@ async def run_pipeline_task(incident_id: str):
             )
 
             await db.commit()
+            await audit("pipeline.completed", incident_id, {"status": incident.status.value, "has_patch": bool(final_state.get("diff_text"))})
 
             await manager.broadcast(
                 incident_id,
@@ -497,6 +521,9 @@ async def run_pipeline_task(incident_id: str):
             incident.error_message = str(exc)
 
             await db.commit()
+            await audit("pipeline.failed", incident_id, {"error_type": type(exc).__name__, "error": str(exc)[:1000]})
+            if 'last_stage' in locals() and last_stage is not None:
+                await metric(incident_id, last_stage, (time.perf_counter() - stage_started) * 1000, "failure")
 
             await manager.broadcast(
                 incident_id,
@@ -532,6 +559,7 @@ async def run_pipeline(
             status_code=400, detail="Upload a repository before running the pipeline"
         )
     background_tasks.add_task(run_pipeline_task, id)
+    await audit("pipeline.started", id)
     return {"status": "started", "incident_id": id}
 
 
@@ -655,6 +683,7 @@ async def approve_patch(id: str, db: AsyncSession = Depends(get_db)):
     if patch is None:
         raise HTTPException(status_code=404, detail="No patch found for this incident")
     # Approval records human acceptance but does not falsely claim runtime verification.
+    await audit("patch.approved_for_manual_review", id, {"patch_id": patch.id})
     return {
         "status": "approved_for_manual_review",
         "patch_id": patch.id,
@@ -666,8 +695,8 @@ async def approve_patch(id: str, db: AsyncSession = Depends(get_db)):
 async def run_demo(db: AsyncSession = Depends(get_db)):
     sample_path = Path("./sample_data/sample_incident.json")
     sample_repo = Path("./sample_data/sample_repo")
-    if not sample_path.exists() or not sample_repo.exists():
-        raise HTTPException(status_code=500, detail="Sample data is unavailable")
+    if not sample_path.exists():
+        raise HTTPException(status_code=500, detail="Sample incident data is unavailable")
 
     data = json.loads(sample_path.read_text(encoding="utf-8"))
     incident = Incident(
@@ -678,8 +707,64 @@ async def run_demo(db: AsyncSession = Depends(get_db)):
     db.add(incident)
     await db.commit()
     await db.refresh(incident)
+    await audit("demo.created", incident.id, {"source": "bundled_demo"})
 
     workspace = WORKSPACE_ROOT / incident.id
     workspace.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(sample_repo, workspace / sample_repo.name, dirs_exist_ok=True)
+    if sample_repo.exists():
+        shutil.copytree(sample_repo, workspace / sample_repo.name, dirs_exist_ok=True)
+    else:
+        # Keep the demo deterministic even when the optional sample repository was not packaged.
+        demo_repo = workspace / "sample_repo"
+        demo_repo.mkdir(parents=True, exist_ok=True)
+        (demo_repo / "pricing.py").write_text(
+            'def apply_discount(item, discount_pct):\n    return item["price"] * (1 - discount_pct / 100)\n',
+            encoding="utf-8",
+        )
     return {"incident_id": incident.id, "message": "Demo incident is ready"}
+
+
+@router.get("/metrics")
+async def operational_metrics():
+    """Aggregated persisted per-agent latency and failure metrics."""
+    return await metrics_summary()
+
+
+@router.get("/audit")
+async def audit_records(limit: int = 100, db: AsyncSession = Depends(get_db)):
+    from backend.database import AuditEvent
+    result = await db.execute(select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(max(1, min(limit, 500))))
+    return [{"id": row.id, "incident_id": row.incident_id, "action": row.action,
+             "details": row.details, "created_at": row.created_at.isoformat()} for row in result.scalars().all()]
+
+
+@router.post("/webhooks/sentry")
+async def sentry_webhook(request: Request, x_sentry_hook_signature: str | None = Header(default=None),
+                         db: AsyncSession = Depends(get_db)):
+    """Accept Sentry issue/event webhooks; configure SENTRY_WEBHOOK_SECRET when available."""
+    if not sentry_secret_valid(x_sentry_hook_signature):
+        raise HTTPException(status_code=401, detail="Invalid Sentry webhook secret")
+    payload = await request.json()
+    data = payload.get("data", {}) if isinstance(payload, dict) else {}
+    issue = data.get("issue", {}) if isinstance(data, dict) else {}
+    event = data.get("event", {}) if isinstance(data, dict) else {}
+    title = issue.get("title") or event.get("title") or payload.get("message") or "Sentry incident"
+    trace = trace_context(dict(request.headers))
+    event_context = event.get("contexts", {}) if isinstance(event, dict) else {}
+    trace.update({"sentry_event_id": event.get("event_id") or payload.get("event_id"),
+                  "sentry_issue_id": issue.get("id"), "sentry_project": issue.get("project"),
+                  "sentry_url": issue.get("web_url") or issue.get("url"),
+                  "sentry_contexts": event_context if isinstance(event_context, dict) else {}})
+    exception_data = event.get("exception", {}) if isinstance(event, dict) else {}
+    exception_values = exception_data.get("values", []) if isinstance(exception_data, dict) else []
+    exception_type = (exception_values[0].get("type") if exception_values and isinstance(exception_values[0], dict) else None)
+    incident = Incident(description=str(event.get("message") or title)[:20000],
+                        title=str(title)[:500], service_name="sentry",
+                        error_type=str(exception_type or "SentryIssue")[:200],
+                        error_message=str(event.get("message") or title)[:4000],
+                        telemetry_context=trace, status=IncidentStatus.submitted)
+    db.add(incident)
+    await db.commit()
+    await db.refresh(incident)
+    await audit("sentry.webhook_received", incident.id, {"issue_id": issue.get("id"), "event_id": event.get("event_id")})
+    return {"status": "accepted", "incident_id": incident.id}

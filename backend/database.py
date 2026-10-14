@@ -92,6 +92,27 @@ class VerificationResult(Base):
     verified_at = Column(DateTime, default=datetime.utcnow)
 
 
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    incident_id = Column(String, nullable=True, index=True)
+    action = Column(String, nullable=False, index=True)
+    details = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class AgentMetric(Base):
+    __tablename__ = "agent_metrics"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    incident_id = Column(String, nullable=False, index=True)
+    agent = Column(String, nullable=False, index=True)
+    duration_ms = Column(Float, nullable=False, default=0)
+    outcome = Column(String, nullable=False, default="success")
+    model = Column(String, nullable=True)
+    usage = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 engine = create_async_engine(settings.database_url, echo=False)
 AsyncSessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -101,6 +122,11 @@ async def init_db():
         await conn.run_sync(Base.metadata.create_all)
 
 
+async def ensure_db_ready():
+    await init_db()
+
+
 async def get_db():
+    await ensure_db_ready()
     async with AsyncSessionLocal() as session:
         yield session
