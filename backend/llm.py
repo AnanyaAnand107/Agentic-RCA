@@ -206,6 +206,12 @@ def _generate(
                         "unavailable",
                         "timed out",
                         "timeout",
+                        "deadline exceeded",
+                        "connection reset",
+                        "connection error",
+                        "rate limit",
+                        "resource_exhausted",
+                        "internal server error",
                     )
                 )
                 if is_transient and attempt < TRANSIENT_RETRIES:
