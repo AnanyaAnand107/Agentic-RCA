@@ -71,6 +71,9 @@ def patch_synthesizer(state: AgentState) -> AgentState:
     error_message = state.get("error_message", "Unknown")
     generated_test = state.get("generated_test", "")
     forensic = state.get("forensic_analysis", "")
+    reflection_feedback = state.get("verification_feedback", "")
+    previous_patch = state.get("patched_code", "")
+    reflection_count = int(state.get("reflection_count", 0) or 0)
     source_path, relative_path = _resolve(repo_path, affected_file)
 
     if not source_path:
@@ -98,6 +101,14 @@ FORENSIC ANALYSIS:
 GENERATED REPRODUCTION TEST:
 {generated_test or "No reproduction test was generated."}
 
+REFLECTION ATTEMPT: {reflection_count}
+PREVIOUS CANDIDATE (if this is a reflection attempt):
+```text
+{previous_patch[:24000] if reflection_count else "No previous candidate."}
+```
+VERIFICATION FEEDBACK (must be addressed if present):
+{reflection_feedback or "Initial patch generation; no previous verification feedback."}
+
 ORIGINAL {language} SOURCE:
 ```text
 {original[:32000]}
@@ -109,6 +120,8 @@ RULES:
 - Do NOT force the original exception to remain; the objective is to eliminate the observed failure when the input is valid for the product's intended behavior.
 - Do NOT invent APIs, files, configuration, database schemas, or dependencies.
 - Preserve public interfaces unless the evidence requires otherwise.
+- If verification feedback is present, explicitly fix the reported failure; do not weaken, remove, or skip tests.
+- Keep the change minimal and grounded in the supplied source and evidence.
 - Return the COMPLETE corrected source file.
 - Return ONLY JSON with:
 {{
@@ -164,7 +177,9 @@ Incident: {error_type}: {error_message}
 Return ONLY JSON with root_cause_explanation and patched_code containing a complete corrected Python file.
 """.strip()
             try:
-                repair_text, repair_provider = generate("patch", repair_prompt, temperature=0.0, max_tokens=7000)
+                repair_text, repair_provider = generate_validated(
+                    "patch", repair_prompt, validator=_parse_patch, temperature=0.0, max_tokens=7000
+                )
                 repaired, repair_explanation = _parse_patch(repair_text)
                 valid, reason = _validate_python(repaired)
                 if valid:
@@ -193,6 +208,12 @@ Return ONLY JSON with root_cause_explanation and patched_code containing a compl
         "original_code": original,
         "patched_code": patched,
         "diff_text": diff or "(no diff)",
+        "patch_test_result": "",
+        "patch_test_output": "",
+        "verification_passed": None,
+        "regression_passed": None,
+        "verification_feedback": "",
+        "needs_reflection": False,
         "patch_file": relative_path,
         "root_cause_explanation": explanation or "Candidate fix generated from supplied evidence.",
         "patch_model": provider,
@@ -202,5 +223,7 @@ Return ONLY JSON with root_cause_explanation and patched_code containing a compl
             f"candidate file: {relative_path}",
             f"diff lines: {len(diff.splitlines())}",
             "patch not written to repository; awaiting isolated verification",
+            f"reflection attempt: {reflection_count}/{1}",
+            "verification feedback incorporated" if reflection_feedback else "no prior verification feedback",
         ],
     }

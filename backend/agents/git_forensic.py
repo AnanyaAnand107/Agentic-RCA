@@ -7,7 +7,7 @@ import os
 import re
 
 from backend.agents.state import AgentState
-from backend.llm import extract_json, generate
+from backend.llm import extract_json, generate_validated
 
 logger = logging.getLogger(__name__)
 
@@ -40,13 +40,20 @@ def _repo_files(repo_path: str) -> list[str]:
 
 
 def _commit_diff(commit, parent, target_file: str) -> str:
+    """Return a commit's forward diff so added-line hunks use current line numbers."""
     try:
-        for diff in commit.diff(parent, create_patch=True):
-            if diff.a_path == target_file or diff.b_path == target_file:
-                raw = diff.diff
-                return raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
-    except Exception:
-        return ""
+        if parent is not None:
+            diffs = parent.diff(commit, create_patch=True)
+            for diff in diffs:
+                if diff.a_path == target_file or diff.b_path == target_file:
+                    raw = diff.diff
+                    return raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+        else:
+            from git.objects import NULL_TREE
+            # Ask Git for the root commit's forward diff (empty tree -> first commit).
+            return str(commit.repo.git.diff(NULL_TREE, commit.hexsha, "--", target_file))
+    except Exception as exc:
+        logger.debug("Could not read diff for %s: %s", getattr(commit, "hexsha", "unknown"), exc)
     return ""
 
 
@@ -128,9 +135,9 @@ def _rank_commits(repo_path: str, affected_file: str, affected_function: str, er
     return candidates[:8], signals
 
 
-def _llm_review(state: AgentState, candidates: list[dict]) -> tuple[str, list[str], str]:
+def _llm_review(state: AgentState, candidates: list[dict]) -> tuple[str, list[str], str, str]:
     if not candidates:
-        return "", [], ""
+        return "", [], "", ""
 
     evidence = []
     for c in candidates[:6]:
@@ -166,19 +173,37 @@ RULES:
 }}
 """.strip()
 
+    valid_hashes = {c["commit_hash"] for c in candidates}
+
+    def validate_response(raw: str) -> dict:
+        data = extract_json(raw)
+        if not isinstance(data, dict):
+            raise ValueError("forensic response must be a JSON object")
+        if not isinstance(data.get("analysis", ""), str):
+            raise ValueError("analysis must be a string")
+        if not isinstance(data.get("evidence", []), list):
+            raise ValueError("evidence must be a list")
+        selected = data.get("selected_commit_hash")
+        if selected not in (None, "") and selected not in valid_hashes:
+            raise ValueError("selected commit must match one of the supplied candidates")
+        if str(data.get("confidence", "insufficient")).lower() not in {"high", "medium", "low", "insufficient"}:
+            raise ValueError("confidence must be high, medium, low, or insufficient")
+        return data
+
     try:
-        text, provider = generate("forensics", prompt, temperature=0.0, max_tokens=1800)
-        data = extract_json(text)
+        text, provider = generate_validated(
+            "forensics", prompt, validator=validate_response, temperature=0.0, max_tokens=1800
+        )
+        data = validate_response(text)
         selected = str(data.get("selected_commit_hash") or "")
-        valid = {c["commit_hash"] for c in candidates}
-        if selected not in valid:
+        if selected not in valid_hashes:
             selected = candidates[0]["commit_hash"] if candidates else ""
         analysis = str(data.get("analysis") or "Evidence is insufficient for a confident attribution.")
-        evidence_out = [str(x) for x in (data.get("evidence") or [])][:6]
-        return analysis, evidence_out, provider
+        evidence_out = [str(x) for x in (data.get("evidence") or []) if isinstance(x, (str, int, float))][:6]
+        return analysis, evidence_out, provider, selected
     except Exception as exc:
         logger.warning("Forensic model failed: %s", exc)
-        return "Evidence was ranked deterministically; model review was unavailable.", [], ""
+        return "Evidence was ranked deterministically; model review was unavailable.", [], "", candidates[0]["commit_hash"] if candidates else ""
 
 
 def git_forensic(state: AgentState) -> AgentState:
@@ -207,20 +232,14 @@ def git_forensic(state: AgentState) -> AgentState:
 
     try:
         candidates, signals = _rank_commits(repo_path, affected_file, affected_function, error_message, line)
-        analysis, evidence, provider = _llm_review(state, candidates)
-        selected_hash = ""
-        if candidates:
-            selected_hash = candidates[0]["commit_hash"]
-            for c in candidates:
-                if c["commit_hash"] in analysis:
-                    selected_hash = c["commit_hash"]
-                    break
+        analysis, evidence, provider, selected_hash = _llm_review(state, candidates)
 
         selected = next((c for c in candidates if c["commit_hash"] == selected_hash), candidates[0] if candidates else {})
         logs = [
             f"git history scanned: {len(candidates)} evidence-bearing candidates",
             f"top candidate: {selected.get('commit_hash') or 'none'}",
             f"model review: {provider or 'unavailable'}",
+            f"selected commit: {selected.get('commit_hash') or 'none'} (validated against ranked candidates)",
         ]
         return {
             "suspect_commits": candidates,

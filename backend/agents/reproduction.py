@@ -1,8 +1,8 @@
 """Stage 3: generate and execute a focused regression reproducer.
 
-No sandbox is used in this version. Generated tests are written to the system
-temporary directory, never into the uploaded repository. Strict AST checks
-limit imports and dangerous operations before pytest is invoked.
+This agent generates and statically validates a focused test. It does not execute
+model-generated code; the sandbox/verification owner must execute the returned test
+in an isolated workspace and feed the result back as patch_test_result/output.
 """
 
 from __future__ import annotations
@@ -10,9 +10,6 @@ from __future__ import annotations
 import ast
 import logging
 import os
-import subprocess
-import sys
-import tempfile
 from pathlib import Path
 
 from backend.agents.state import AgentState
@@ -22,10 +19,14 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_IMPORTS = {"pytest"}
 BLOCKED_NAMES = {
-    "eval", "exec", "compile", "open", "input", "breakpoint",
+    "eval", "exec", "compile", "__import__", "open", "input", "breakpoint",
     "system", "popen", "run", "Popen", "call", "check_call", "check_output",
+    "getattr", "setattr", "delattr", "globals", "locals", "vars",
 }
-BLOCKED_MODULES = {"subprocess", "os", "shutil", "socket", "requests", "httpx", "pathlib", "ctypes"}
+BLOCKED_MODULES = {
+    "subprocess", "os", "shutil", "socket", "requests", "httpx", "pathlib", "ctypes",
+    "importlib", "pickle",
+}
 
 
 def _resolve_source(repo_path: str, affected_file: str) -> tuple[str, str]:
@@ -59,6 +60,8 @@ def _validate_test(code: str, module: str, function: str) -> tuple[bool, str]:
         return False, f"syntax error: {exc}"
 
     imported_modules = []
+    pytest_aliases = {"pytest"}
+    raises_aliases = set()
     found_pytest_raises = False
     found_function = False
 
@@ -66,18 +69,29 @@ def _validate_test(code: str, module: str, function: str) -> tuple[bool, str]:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 imported_modules.append(alias.name)
+                if alias.name == "pytest":
+                    pytest_aliases.add(alias.asname or alias.name)
         elif isinstance(node, ast.ImportFrom):
             imported_modules.append(node.module or "")
+            if (node.module or "") == "pytest":
+                for alias in node.names:
+                    if alias.name == "raises":
+                        raises_aliases.add(alias.asname or alias.name)
+                        pytest_aliases.add(alias.asname or alias.name)
         elif isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Name) and node.func.id in BLOCKED_NAMES:
-                return False, f"blocked call: {node.func.id}"
+            if isinstance(node.func, ast.Name):
+                if node.func.id in BLOCKED_NAMES:
+                    return False, f"blocked call: {node.func.id}"
+                if node.func.id in raises_aliases:
+                    found_pytest_raises = True
             if isinstance(node.func, ast.Attribute):
                 if node.func.attr in BLOCKED_NAMES:
                     return False, f"blocked call: {node.func.attr}"
                 if isinstance(node.func.value, ast.Name) and node.func.value.id in BLOCKED_MODULES:
                     return False, f"blocked module call: {node.func.value.id}.{node.func.attr}"
-                if node.func.attr == "raises" and isinstance(node.func.value, ast.Name) and node.func.value.id == "pytest":
-                    found_pytest_raises = True
+                if node.func.attr == "raises" and isinstance(node.func.value, ast.Name):
+                    if node.func.value.id in pytest_aliases:
+                        found_pytest_raises = True
         elif isinstance(node, ast.Name) and node.id == function:
             found_function = True
 
@@ -91,15 +105,6 @@ def _validate_test(code: str, module: str, function: str) -> tuple[bool, str]:
     if function and not found_function:
         return False, f"generated test does not reference affected function {function}"
     return True, "validated"
-
-
-def _write_temp_test(code: str) -> str:
-    handle = tempfile.NamedTemporaryFile(
-        mode="w", suffix="_test.py", prefix="rca_repro_", delete=False, encoding="utf-8"
-    )
-    handle.write(code)
-    handle.close()
-    return handle.name
 
 
 def reproduction(state: AgentState) -> AgentState:
@@ -184,47 +189,18 @@ REQUIREMENTS:
             "stage_logs": [f"generated test rejected: {reason}"],
         }
 
-    temp_test = _write_temp_test(test_code)
-    try:
-        env = os.environ.copy()
-        env["PYTHONPATH"] = os.pathsep.join(filter(None, [repo_path, env.get("PYTHONPATH", "")]))
-        result = subprocess.run(
-            [sys.executable, "-m", "pytest", temp_test, "-q", "--tb=short"],
-            cwd=repo_path,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=45,
-        )
-        output = (result.stdout + result.stderr)[-5000:]
-        test_result = "reproduced" if result.returncode == 0 else "not_reproduced"
-        logs = [
-            f"source resolved: {relative_path}",
-            f"test generated with: {provider}",
-            f"test validation: {reason}",
-            f"pytest result: {test_result}",
-        ]
-        return {
-            "generated_test": test_code,
-            "test_file_name": "generated::test_reproduction.py",
-            "test_result": test_result,
-            "test_output": output,
-            "reproduction_model": provider,
-            "current_stage": "reproduction",
-            "stage_logs": logs,
-        }
-    except subprocess.TimeoutExpired:
-        return {
-            "generated_test": test_code,
-            "test_file_name": "generated::test_reproduction.py",
-            "test_result": "timeout",
-            "test_output": "pytest exceeded 45 seconds",
-            "reproduction_model": provider,
-            "current_stage": "reproduction",
-            "stage_logs": ["reproduction timed out after 45 seconds"],
-        }
-    finally:
-        try:
-            os.unlink(temp_test)
-        except OSError:
-            pass
+    logs = [
+        f"source resolved: {relative_path}",
+        f"test generated with: {provider}",
+        f"test static validation: {reason}",
+        "execution deferred: generated code must run inside the isolated sandbox",
+    ]
+    return {
+        "generated_test": test_code,
+        "test_file_name": "generated::test_reproduction.py",
+        "test_result": "pending_sandbox",
+        "test_output": "Test passed static validation but has not been executed. Run it in the isolated sandbox before treating the incident as reproduced.",
+        "reproduction_model": provider,
+        "current_stage": "reproduction",
+        "stage_logs": logs,
+    }

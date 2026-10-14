@@ -1,4 +1,4 @@
-"""LangGraph orchestration for the five RCA agents."""
+"""LangGraph orchestration for the five RCA agents with a bounded repair loop."""
 
 from langgraph.graph import END, StateGraph
 
@@ -9,9 +9,18 @@ from backend.agents.state import AgentState
 from backend.agents.telemetry_parser import telemetry_parser
 from backend.agents.verification import verification
 
+MAX_REFLECTIONS = 1
+
 
 def should_continue(state: AgentState) -> str:
     return "end" if state.get("error") else "continue"
+
+
+def after_verification(state: AgentState) -> str:
+    """Allow at most one evidence-driven patch revision after a failed check."""
+    if state.get("needs_reflection") and state.get("reflection_count", 0) <= MAX_REFLECTIONS:
+        return "reflect"
+    return "end"
 
 
 def build_pipeline():
@@ -30,11 +39,12 @@ def build_pipeline():
         ("patch_synthesizer", "verification"),
     ]:
         workflow.add_conditional_edges(
-            current,
-            should_continue,
-            {"continue": nxt, "end": END},
+            current, should_continue, {"continue": nxt, "end": END}
         )
-    workflow.add_edge("verification", END)
+
+    workflow.add_conditional_edges(
+        "verification", after_verification, {"reflect": "patch_synthesizer", "end": END}
+    )
     return workflow.compile()
 
 
