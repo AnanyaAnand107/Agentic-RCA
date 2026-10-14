@@ -1,12 +1,13 @@
-"""Stage 5: candidate validation and reflection-loop decision.
-
-The sandbox runner is a separate integration. When it supplies patch_test_result,
-this node consumes its result and returns actionable feedback to the synthesizer.
-Without sandbox results, this node deliberately does not claim a patch is verified.
-"""
+"""Stage 5: candidate validation and reflection-loop decision with Sandbox & GitHub Integration."""
 
 import ast
+import json
 from backend.agents.state import AgentState
+from backend.services.sandbox_service import SandboxVerificationService
+from backend.services.github_service import GitHubService
+# from backend.agents.state import AgentState
+# from ..services.sandbox_service import SandboxVerificationService
+# from ..services.github_service import GitHubService
 
 MAX_REFLECTIONS = 1
 
@@ -14,11 +15,13 @@ MAX_REFLECTIONS = 1
 def verification(state: AgentState) -> AgentState:
     patched = state.get("patched_code", "")
     patch_file = state.get("patch_file", "")
-    test_result = state.get("patch_test_result", "").lower()
-    test_output = state.get("patch_test_output", "")
     count = int(state.get("reflection_count", 0) or 0)
+    repo_path = state.get("repository_path", ".")
+    incident_id = state.get("incident_id", "demo-incident")
+    test_file = state.get("test_file", "tests/")
     logs: list[str] = []
 
+    # 1. Verification stop if no patch present
     if not patched:
         return {
             "verification_passed": None,
@@ -30,6 +33,7 @@ def verification(state: AgentState) -> AgentState:
             "stage_logs": ["verification stopped: no candidate patch"],
         }
 
+    # 2. Static AST Syntax Check
     if patch_file.endswith(".py"):
         try:
             ast.parse(patched)
@@ -50,18 +54,31 @@ def verification(state: AgentState) -> AgentState:
                 "stage_logs": logs,
             }
 
-    if test_result in {"failed", "error", "timeout", "not_reproduced"}:
+    # 3. Dynamic Isolation Check via Sandbox Service (Docker + Disposable Copy)
+    sandbox = SandboxVerificationService()
+    sandbox_res = sandbox.verify_patch(
+        original_repo_path=repo_path,
+        patch_str=patched,
+        test_file=test_file
+    )
+
+    test_passed = sandbox_res.get("verified", False)
+    test_output = sandbox_res.get("reason", "")
+
+    # 4. Handle Failure & Reflection Loop Decision
+    if not test_passed:
         feedback = (
-            "The isolated patch test did not pass. Revise the patch using this execution output; "
-            "do not weaken or delete the regression assertion.\n" + test_output[-5000:]
+            "The isolated patch test did not pass in Docker sandbox. "
+            "Revise the patch using this execution output:\n" + test_output[-5000:]
         )
         retry = count < MAX_REFLECTIONS
-        logs.append(f"isolated patch test: {test_result}")
+        logs.append(f"sandbox verification failed: {test_output}")
         logs.append("reflection retry requested" if retry else "reflection limit reached")
+        
         return {
             "verification_passed": False,
-            "regression_passed": state.get("regression_passed"),
-            "verification_mode": "sandbox" if test_result != "not_reproduced" else "sandbox_reproduction",
+            "regression_passed": False,
+            "verification_mode": "sandbox",
             "verification_feedback": feedback,
             "reflection_count": count + 1 if retry else count,
             "needs_reflection": retry,
@@ -70,44 +87,29 @@ def verification(state: AgentState) -> AgentState:
             "stage_logs": logs,
         }
 
-    if test_result == "passed":
-        regression_result = state.get("regression_passed")
-        passed = regression_result is True
-        logs.append("isolated generated patch test passed")
-        logs.append(f"regression suite passed: {regression_result is True}")
-        if not passed:
-            feedback = "The regression suite did not pass. Use its failure output to correct the patch without weakening tests."
-            retry = count < MAX_REFLECTIONS
-            return {
-                "verification_passed": False,
-                "regression_passed": False,
-                "verification_mode": "sandbox",
-                "verification_feedback": feedback + "\n" + test_output[-5000:],
-                "reflection_count": count + 1 if retry else count,
-                "needs_reflection": retry,
-                "verification_log": "\n".join(logs),
-                "current_stage": "verification",
-                "stage_logs": logs,
-            }
-        logs.append("patch and regression checks passed in the supplied sandbox result")
-        return {
-            "verification_passed": True,
-            "regression_passed": True,
-            "verification_mode": "sandbox",
-            "verification_feedback": "",
-            "needs_reflection": False,
-            "verification_log": "\n".join(logs),
-            "current_stage": "verification",
-            "stage_logs": logs,
-        }
+    # 5. On Successful Sandbox Verification: Create GitHub Pull Request
+    logs.append("patch and regression checks passed in Docker sandbox")
+    logs.append("Opening GitHub PR for human-gated approval...")
 
-    logs.append("runtime patch verification is pending sandbox integration")
+    github_svc = GitHubService()
+    pr_res = github_svc.create_pull_request(
+        incident_id=incident_id,
+        patch_str=patched,
+        forensic_evidence=state.get("root_cause_explanation", "Forensic analysis completed."),
+        verification_summary=test_output
+    )
+
+    pr_url = pr_res.get("pr_url")
+    if pr_url:
+        logs.append(f"GitHub Pull Request opened successfully: {pr_url}")
+
     return {
-        "verification_passed": None,
-        "regression_passed": state.get("regression_passed"),
-        "verification_mode": "pre_isolation",
+        "verification_passed": True,
+        "regression_passed": True,
+        "verification_mode": "sandbox",
         "verification_feedback": "",
         "needs_reflection": False,
+        "pr_url": pr_url,
         "verification_log": "\n".join(logs),
         "current_stage": "verification",
         "stage_logs": logs,
