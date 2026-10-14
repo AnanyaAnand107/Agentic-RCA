@@ -28,6 +28,8 @@ class AgentState(TypedDict, total=False):
     test_result: str
     test_output: str
     reproduction_model: str
+    patch_test_result: str
+    patch_test_output: str
 
     original_code: str
     patched_code: str
@@ -40,6 +42,9 @@ class AgentState(TypedDict, total=False):
     regression_passed: Optional[bool]
     verification_log: str
     verification_mode: str
+    verification_feedback: str
+    reflection_count: int
+    needs_reflection: bool
 
     current_stage: str
     stage_logs: Annotated[list[str], operator.add]
