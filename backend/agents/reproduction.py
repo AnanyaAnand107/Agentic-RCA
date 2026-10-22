@@ -64,6 +64,8 @@ def _validate_test(code: str, module: str, function: str) -> tuple[bool, str]:
     raises_aliases = set()
     found_pytest_raises = False
     found_function = False
+    found_test_function = False
+    found_assertion = False
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -78,6 +80,10 @@ def _validate_test(code: str, module: str, function: str) -> tuple[bool, str]:
                     if alias.name == "raises":
                         raises_aliases.add(alias.asname or alias.name)
                         pytest_aliases.add(alias.asname or alias.name)
+        elif isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
+            found_test_function = True
+        elif isinstance(node, ast.Assert):
+            found_assertion = True
         elif isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name):
                 if node.func.id in BLOCKED_NAMES:
@@ -100,8 +106,12 @@ def _validate_test(code: str, module: str, function: str) -> tuple[bool, str]:
         if imported not in allowed and not imported.startswith(module + "."):
             return False, f"unsupported import: {imported}"
 
-    if not found_pytest_raises:
-        return False, "test must use pytest.raises to encode the observed crash"
+    if found_pytest_raises:
+        return False, "test must assert the expected correct behavior, not expect the production exception"
+    if not found_test_function:
+        return False, "generated code must define a pytest test function"
+    if not found_assertion:
+        return False, "generated test must assert expected correct behavior"
     if function and not found_function:
         return False, f"generated test does not reference affected function {function}"
     return True, "validated"
@@ -140,7 +150,7 @@ def reproduction(state: AgentState) -> AgentState:
     module = _module_name(relative_path)
 
     prompt = f"""
-TASK: Generate one minimal pytest regression test that reproduces the observed production exception.
+TASK: Generate one minimal pytest regression test that asserts the intended correct behavior and fails on the observed bug.
 
 INCIDENT:
 error type: {error_type}
@@ -159,9 +169,10 @@ REQUIREMENTS:
 1. Import ONLY pytest and the affected module/function.
 2. Do not use subprocess, os, pathlib, network calls, filesystem writes, eval, exec, or shell commands.
 3. Call the real affected function with inputs derived from the source and incident; never invent an unrelated API.
-4. Encode the observed exception using pytest.raises(<exception type>).
-5. Keep the test minimal and deterministic.
-6. Return ONLY Python code. No markdown and no explanation.
+4. Assert the expected correct result for a valid input. The test must fail before the fix because of the observed defect and pass after the fix.
+5. Do NOT use pytest.raises to expect the production exception. Do not assert that the bug remains.
+6. Keep the test minimal and deterministic, and define a test_... function containing a meaningful assert.
+7. Return ONLY Python code. No markdown and no explanation.
 """.strip()
 
     try:
@@ -197,7 +208,7 @@ REQUIREMENTS:
     ]
     return {
         "generated_test": test_code,
-        "test_file_name": "generated::test_reproduction.py",
+        "test_file_name": "tests/test_generated_reproduction.py",
         "test_result": "pending_sandbox",
         "test_output": "Test passed static validation but has not been executed. Run it in the isolated sandbox before treating the incident as reproduced.",
         "reproduction_model": provider,

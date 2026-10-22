@@ -30,6 +30,9 @@ class AgentState(TypedDict, total=False):
     reproduction_model: str
     patch_test_result: str
     patch_test_output: str
+    sandbox_status: str
+    sandbox_result: dict
+    pr_url: Optional[str]
 
     original_code: str
     patched_code: str

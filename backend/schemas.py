@@ -45,6 +45,10 @@ class ReportResponse(BaseModel):
     verification_passed: Optional[bool] = None
     verification_mode: Optional[str] = None
     verification_log: Optional[str] = None
+    regression_passed: Optional[bool] = None
+    pr_url: Optional[str] = None
+    pr_status: Optional[str] = None
+    pr_error: Optional[str] = None
     root_cause_explanation: Optional[str] = None
     forensic_analysis: Optional[str] = None
     forensic_evidence: list[str] = Field(default_factory=list)

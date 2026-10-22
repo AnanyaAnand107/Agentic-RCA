@@ -1,8 +1,7 @@
 """Stage 4: synthesize a candidate fix with a coding model and review pass.
 
 The agent never writes the patch into the uploaded repository. It returns a
-candidate source file and unified diff for human review. Runtime fix
-verification is intentionally deferred until sandboxing is added later.
+candidate source file and unified diff for human review. Runtime verification is performed by the isolated sandbox verification stage.
 """
 
 from __future__ import annotations
