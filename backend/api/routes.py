@@ -99,7 +99,8 @@ async def health_check():
         "status": "ok",
         "service": "rca-agent-backend",
         "models": model_status(),
-        "sandbox_enabled": False,
+        "sandbox_enabled": bool(shutil.which("docker")),
+        "sandbox_image": os.getenv("RCA_SANDBOX_IMAGE", "agentic-rca-sandbox:py311"),
     }
 
 
@@ -374,6 +375,13 @@ async def run_pipeline_task(incident_id: str):
                     "reproduction": final_state.get("reproduction_model"),
                     "patch": final_state.get("patch_model"),
                 },
+                "verification_mode": final_state.get("verification_mode", "not_verified"),
+                "verification_passed": final_state.get("verification_passed") is True,
+                "regression_passed": final_state.get("regression_passed"),
+                "verification_log": final_state.get("verification_log", ""),
+                "patch_test_result": final_state.get("patch_test_result", "not_run"),
+                "patch_test_output": final_state.get("patch_test_output", ""),
+                "pr_url": None,
             }
 
             incident.title = final_state.get("root_cause_explanation")
@@ -428,14 +436,8 @@ async def run_pipeline_task(incident_id: str):
                             "test_file_name",
                             "generated::test_reproduction.py",
                         ),
-                        execution_result=final_state.get(
-                            "test_result",
-                            "unknown",
-                        ),
-                        output_log=final_state.get(
-                            "test_output",
-                            "",
-                        ),
+                        execution_result=final_state.get("patch_test_result") or final_state.get("test_result", "unknown"),
+                        output_log=final_state.get("patch_test_output") or final_state.get("test_output", ""),
                     )
                 )
 
@@ -472,7 +474,7 @@ async def run_pipeline_task(incident_id: str):
                     VerificationResult(
                         incident_id=incident_id,
                         patch_id=patch_id,
-                        test_passed=(final_state.get("test_result") == "reproduced"),
+                        test_passed=(final_state.get("verification_passed") is True),
                         regression_passed=final_state.get("regression_passed"),
                         output_log=final_state.get(
                             "verification_log",
@@ -486,11 +488,8 @@ async def run_pipeline_task(incident_id: str):
                              model=(final_state.get("reproduction_model") if last_stage == "reproduction" else final_state.get("patch_model") if last_stage == "patch_synthesizer" else None),
                              usage=final_state.get("model_usage", {}) if isinstance(final_state.get("model_usage", {}), dict) else {})
 
-            incident.status = (
-                IncidentStatus.resolved
-                if final_state.get("verification_passed") is True
-                else IncidentStatus.patch_ready
-            )
+            # A verified candidate is ready for human review; it is not resolved until merged/deployed.
+            incident.status = IncidentStatus.patch_ready
 
             await db.commit()
             await audit("pipeline.completed", incident_id, {"status": incident.status.value, "has_patch": bool(final_state.get("diff_text"))})
@@ -502,10 +501,8 @@ async def run_pipeline_task(incident_id: str):
                     "current_stage": "done",
                     "progress_pct": 100,
                     "log": (
-                        "Analysis complete; runtime patch "
-                        "verification is pending isolated execution"
-                        if incident.status == IncidentStatus.patch_ready
-                        else "Pipeline completed and patch verified"
+                        "Analysis complete. Candidate verification status: "
+                        + ("verified; awaiting human approval" if final_state.get("verification_passed") is True else "not verified; inspect the report and logs")
                     ),
                 },
             )
@@ -642,7 +639,11 @@ async def get_report(id: str, db: AsyncSession = Depends(get_db)):
         "patch_diff": patch.diff_text if patch else None,
         "patch_file": patch.file_path if patch else None,
         "verification_passed": patch.is_verified if patch else None,
-        "verification_mode": "pre_isolation" if verification else None,
+        "verification_mode": context.get("verification_mode", "not_verified") if verification else None,
+        "regression_passed": context.get("regression_passed"),
+        "pr_url": context.get("pr_url"),
+        "pr_status": context.get("pr_status"),
+        "pr_error": context.get("pr_error"),
         "verification_log": verification.output_log if verification else None,
         "root_cause_explanation": incident.title,
         "forensic_analysis": context.get("forensic_analysis"),
@@ -668,12 +669,17 @@ async def get_patch(id: str, db: AsyncSession = Depends(get_db)):
         "original_code": patch.original_code,
         "patched_code": patch.patched_code,
         "is_verified": patch.is_verified,
-        "verification_mode": "pre_isolation",
+        "verification_mode": "docker_sandbox" if patch.is_verified else "not_verified",
     }
 
 
 @router.post("/incidents/{id}/approve")
 async def approve_patch(id: str, db: AsyncSession = Depends(get_db)):
+    """Human-triggered PR publishing; refuses unverified candidates."""
+    inc_result = await db.execute(select(Incident).where(Incident.id == id))
+    incident = inc_result.scalar_one_or_none()
+    if incident is None:
+        raise HTTPException(status_code=404, detail="Incident not found")
     result = await db.execute(
         select(CandidatePatch)
         .where(CandidatePatch.incident_id == id)
@@ -682,12 +688,36 @@ async def approve_patch(id: str, db: AsyncSession = Depends(get_db)):
     patch = result.scalars().first()
     if patch is None:
         raise HTTPException(status_code=404, detail="No patch found for this incident")
-    # Approval records human acceptance but does not falsely claim runtime verification.
-    await audit("patch.approved_for_manual_review", id, {"patch_id": patch.id})
+    if patch.is_verified is not True:
+        raise HTTPException(status_code=409, detail="Cannot publish an unverified patch. Sandbox reproduction and regression checks must pass first.")
+
+    # This endpoint is called only after the human presses the approval action.
+    from backend.services.github_service import GitHubService
+    context = dict(incident.telemetry_context or {})
+    publisher = GitHubService()
+    pr_result = publisher.create_pull_request(
+        incident_id=id,
+        patch_str=patch.diff_text or "",
+        forensic_evidence=context.get("forensic_analysis") or incident.title or "Forensic analysis completed.",
+        verification_summary=context.get("verification_log") or "Sandbox reproduction and regression checks passed.",
+        verification_passed=patch.is_verified is True,
+        human_approved=True,
+    )
+    context["pr_status"] = pr_result.get("status", "unknown")
+    context["pr_url"] = pr_result.get("pr_url")
+    context["pr_error"] = pr_result.get("reason")
+    incident.telemetry_context = context
+    await db.commit()
+    await audit("patch.publish_requested", id, {"patch_id": patch.id, "pr_status": pr_result.get("status"), "pr_url": pr_result.get("pr_url")})
+    if pr_result.get("status") not in {"created", "exists"}:
+        raise HTTPException(status_code=502, detail={"message": "Patch was approved, but GitHub PR creation did not complete.", "github": pr_result})
     return {
-        "status": "approved_for_manual_review",
+        "status": pr_result.get("status"),
         "patch_id": patch.id,
-        "verification": "pending_isolated_execution",
+        "pr_url": pr_result.get("pr_url"),
+        "pr_number": pr_result.get("pr_number"),
+        "verification": "verified",
+        "human_approval": "recorded",
     }
 
 
