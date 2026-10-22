@@ -9,7 +9,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const contentType = response.headers.get("content-type") || "";
   const data = contentType.includes("application/json") ? await response.json() : await response.text();
   if (!response.ok) {
-    const detail = typeof data === "object" && data && "detail" in data ? String(data.detail) : `HTTP ${response.status}`;
+    const detail = typeof data === "object" && data && "detail" in data ? (typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail)) : `HTTP ${response.status}`;
     throw new Error(detail);
   }
   return data as T;
@@ -52,6 +52,11 @@ export type Report = {
   verification_passed?: boolean | null;
   verification_mode?: string | null;
   verification_log?: string | null;
+  regression_passed?: boolean | null;
+  pr_url?: string | null;
+  pr_status?: string | null;
+  pr_error?: string | null;
+  pr_error?: string | null;
   root_cause_explanation?: string | null;
   forensic_analysis?: string | null;
   forensic_evidence: string[];
@@ -75,6 +80,7 @@ export type Health = {
     hf_analysis_model: string;
   };
   sandbox_enabled: boolean;
+  sandbox_image?: string;
 };
 
 export const api = {
@@ -97,7 +103,7 @@ export const api = {
   run: (id: string) => request<{ status: string; incident_id: string }>(`/api/incidents/${id}/run`, { method: "POST" }),
   status: (id: string) => request<PipelineStatus>(`/api/incidents/${id}/status`),
   report: (id: string) => request<Report>(`/api/incidents/${id}/report`),
-  approve: (id: string) => request<{ status: string; incident_id: string }>(`/api/incidents/${id}/approve`, { method: "POST" }),
+  approve: (id: string) => request<{ status: string; patch_id: string; pr_url?: string | null; pr_number?: number | null; verification: string; human_approval: string }>(`/api/incidents/${id}/approve`, { method: "POST" }),
   demo: () => request<{ incident_id: string; message: string }>("/api/demo", { method: "POST" })
 };
 

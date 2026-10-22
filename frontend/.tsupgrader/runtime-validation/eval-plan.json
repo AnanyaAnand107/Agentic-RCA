@@ -1,0 +1,37 @@
+{
+  "generatedAt": "2026-10-15T12:36:36+05:30",
+  "generatedOnPlatform": "win32",
+  "projectType": "webapp",
+  "setup": [],
+  "assertions": [
+    {
+      "name": "frontend-typecheck",
+      "kind": "process",
+      "command": "npx",
+      "args": ["tsc", "--noEmit"],
+      "verificationMethod": "exit-code",
+      "expected": "0",
+      "timeoutSeconds": 180
+    },
+    {
+      "name": "tests-pass",
+      "kind": "process",
+      "command": "C:\\Users\\Archit\\Downloads\\Agentic-RCA\\Agentic-RCA\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "pytest", "-q"],
+      "cwd": "C:\\Users\\Archit\\Downloads\\Agentic-RCA\\Agentic-RCA",
+      "verificationMethod": "test-results",
+      "expected": "0",
+      "timeoutSeconds": 300
+    },
+    {
+      "name": "frontend-home-200",
+      "kind": "http-probe",
+      "startCommand": "npm",
+      "startArgs": ["run", "dev", "--", "-p", "3100"],
+      "url": "http://localhost:3100/",
+      "verificationMethod": "http-status",
+      "expected": "200",
+      "timeoutSeconds": 120
+    }
+  ]
+}

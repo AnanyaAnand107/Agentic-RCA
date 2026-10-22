@@ -4,7 +4,7 @@ import { CodePanel } from "./CodePanel";
 
 export function ResultDashboard({ report, onApprove, approving }: { report: Report; onApprove: () => void; approving: boolean }) {
   const suspect = report.suspect_commits[0];
-  const verification = report.verification_passed === true ? "verified" : report.verification_passed === false ? "failed" : "pending";
+  const verification = report.verification_passed === true ? "verified" : report.verification_passed === false ? "not-verified" : "pending";
 
   return <section className="space-y-4">
     <div className="grid gap-4 lg:grid-cols-[1.2fr_.8fr]">
@@ -16,11 +16,13 @@ export function ResultDashboard({ report, onApprove, approving }: { report: Repo
       </div>
       <div className="panel p-6">
         <div className="eyebrow">Verification state</div>
-        <div className={`mt-3 flex items-center gap-3 text-base font-semibold ${verification === "verified" ? "text-emerald-300" : verification === "failed" ? "text-red-300" : "text-amber-200"}`}>
-          {verification === "verified" ? <CheckCircle2 size={18}/> : verification === "failed" ? <AlertTriangle size={18}/> : <ShieldCheck size={18}/>} {verification === "verified" ? "Runtime verified" : verification === "failed" ? "Validation failed" : "Patch ready for review"}
+        <div className={`mt-3 flex items-center gap-3 text-base font-semibold ${verification === "verified" ? "text-emerald-300" : verification === "not-verified" ? "text-red-300" : "text-amber-200"}`}>
+          {verification === "verified" ? <CheckCircle2 size={18}/> : verification === "not-verified" ? <AlertTriangle size={18}/> : <ShieldCheck size={18}/>} {verification === "verified" ? "Runtime verified" : verification === "not-verified" ? "Not verified — review logs" : "Awaiting verification"}
         </div>
-        <p className="mt-3 whitespace-pre-line text-sm leading-6 text-zinc-300">{report.verification_log || "Runtime patch verification remains deferred until isolated execution is enabled."}</p>
-        {report.patch_diff && <button onClick={onApprove} disabled={approving} className="mt-5 w-full rounded-xl border border-white/[.12] bg-white/[.04] px-4 py-3 text-sm font-semibold text-zinc-100 transition hover:bg-white/[.08] disabled:opacity-40">{approving ? "Recording approval..." : "Approve for manual review"}</button>}
+        <p className="mt-3 whitespace-pre-line text-sm leading-6 text-zinc-300">{report.verification_log || "No sandbox verification result is available yet."}</p>
+        {report.patch_diff && <button onClick={onApprove} disabled={approving || report.verification_passed !== true || Boolean(report.pr_url)} className="mt-5 w-full rounded-xl border border-white/[.12] bg-white/[.04] px-4 py-3 text-sm font-semibold text-zinc-100 transition hover:bg-white/[.08] disabled:opacity-40">{approving ? "Creating pull request..." : report.pr_url ? "Pull request created" : report.verification_passed === true ? "Approve & open GitHub PR" : "PR publishing requires successful sandbox verification"}</button>}
+        {report.pr_url && <a href={report.pr_url} target="_blank" rel="noreferrer" className="mt-3 block break-all text-sm text-indigo-300 underline">Open GitHub pull request</a>}
+        {report.pr_status && !report.pr_url && <p className="mt-3 text-sm text-amber-200">GitHub status: {report.pr_status}</p>}
       </div>
     </div>
 

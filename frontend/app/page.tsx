@@ -374,13 +374,7 @@ export default function Home() {
 
       setReport((current) =>
         current
-          ? {
-              ...current,
-              incident: {
-                ...current.incident,
-                status: response.status,
-              },
-            }
+          ? { ...current, pr_url: response.pr_url ?? current.pr_url, pr_status: response.status }
           : current,
       );
     } catch (e) {
