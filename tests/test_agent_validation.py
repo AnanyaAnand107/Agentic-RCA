@@ -9,16 +9,17 @@ def test_reproduction_rejects_dangerous_code():
     assert "unsupported import" in reason or "blocked" in reason
 
 
-def test_reproduction_accepts_grounded_shape():
-    code = "```python\nimport pytest\nfrom pricing import apply_discount\ndef test_apply_discount():\n    with pytest.raises(KeyError):\n        apply_discount({'name': 'x'}, 10)\n```"
+def test_reproduction_accepts_correct_behavior_assertion():
+    code = "import pytest\nfrom pricing import apply_discount\ndef test_apply_discount():\n    result = apply_discount({'price': 100}, 10)\n    assert result == 90\n"
     ok, reason = _validate_test(code, "pricing", "apply_discount")
     assert ok, reason
 
 
-def test_reproduction_accepts_direct_pytest_raises_import():
-    code = "from pytest import raises\nfrom pricing import apply_discount\ndef test_apply_discount():\n    with raises(KeyError):\n        apply_discount({'name': 'x'}, 10)\n"
+def test_reproduction_rejects_pytest_raises_bug_preservation():
+    code = "import pytest\nfrom pricing import apply_discount\ndef test_apply_discount():\n    with pytest.raises(KeyError):\n        apply_discount({'name': 'x'}, 10)\n"
     ok, reason = _validate_test(code, "pricing", "apply_discount")
-    assert ok, reason
+    assert not ok
+    assert "expected correct behavior" in reason
 
 
 def test_patch_python_syntax_validation():
@@ -80,3 +81,33 @@ def test_git_line_proximity_uses_added_line_numbers():
     diff = "@@ -10,2 +10,3 @@ def checkout():\n old()\n+raise KeyError('price')\n next()\n"
     assert _line_distance(diff, 11)
     assert not _line_distance(diff, 30)
+
+
+def test_verification_does_not_publish_github_automatically(monkeypatch, tmp_path):
+    import importlib
+    verification_module = importlib.import_module("backend.agents.verification")
+
+    class FakeSandbox:
+        def verify_patch(self, **kwargs):
+            assert kwargs["patch_str"].startswith("--- a/")
+            assert "def test_fix" in kwargs["generated_test"]
+            return {"verified": True, "status": "verified", "regression_passed": True, "reason": "all checks passed"}
+
+    class ForbiddenGitHub:
+        def __init__(self):
+            raise AssertionError("GitHub publishing must wait for explicit human approval")
+
+    monkeypatch.setattr(verification_module, "SandboxVerificationService", FakeSandbox)
+    monkeypatch.setattr(verification_module, "GitHubService", ForbiddenGitHub, raising=False)
+    result = verification_module.verification({
+        "patched_code": "def fix():\n    return True\n",
+        "patch_file": "pricing.py",
+        "diff_text": "--- a/pricing.py\n+++ b/pricing.py\n@@ -1 +1 @@\n-def fix():\n-    return False\n+def fix():\n+    return True\n",
+        "repo_path": str(tmp_path),
+        "generated_test": "def test_fix():\n    from pricing import fix\n    assert fix() is True\n",
+        "test_file_name": "tests/test_generated_reproduction.py",
+        "reflection_count": 0,
+    })
+    assert result["verification_passed"] is True
+    assert result["needs_reflection"] is False
+    assert result["pr_url"] is None
