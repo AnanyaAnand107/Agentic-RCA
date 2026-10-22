@@ -84,3 +84,50 @@ The frontend uses the REST API for incident creation/upload/start/report and Web
 ## Clean-up performed
 
 Removed prototype/utility artifacts that were not part of the production RCA workflow, including the old static HTML frontend, patch helper scripts, unrelated Strategy-pattern Java demo files, generated caches, local database state, and generated reproduction test artifacts.
+
+## Isolated patch verification and GitHub PR publishing
+
+Runtime verification is fail-closed: the backend never falls back to executing candidate code on the host. A patch is marked verified only when the generated reproduction test fails by assertion before the patch, passes after the patch, and the complete pytest regression suite passes in Docker.
+
+### Build the sandbox image
+
+Build this image from the project root in a trusted environment with internet access for dependency installation:
+
+```bash
+docker build -f backend/services/sandbox.Dockerfile -t agentic-rca-sandbox:py311 .
+```
+
+The verification container is then run with networking disabled, a read-only container root filesystem, non-root user, dropped capabilities, no-new-privileges, and CPU/memory/PID/time limits. The generated patch is applied only to a temporary copy of the uploaded repository. If Docker or the image is unavailable, verification fails explicitly; the application does not run uploaded code on the host.
+
+The sandbox image includes this application's declared `requirements.txt`. Uploaded repositories that require additional runtime packages need a separately reviewed, trusted sandbox image containing those dependencies; dependencies from an untrusted uploaded repository are not installed automatically.
+
+### Optional GitHub publishing
+
+Set these values in `.env` only if you want the human approval action to publish a pull request:
+
+```dotenv
+GITHUB_TOKEN=
+GITHUB_REPO=owner/repository
+GITHUB_BASE_BRANCH=main
+GITHUB_HTTP_TIMEOUT=15
+RCA_SANDBOX_IMAGE=agentic-rca-sandbox:py311
+```
+
+Use a fine-grained token scoped only to the target repository with the minimum contents and pull-request permissions required. Do not commit `.env` or the token. GitHub publishing is blocked unless the candidate is sandbox-verified and the user explicitly invokes the approval action. Publishing clones the configured target repository into a temporary directory, applies the validated unified diff, commits only changed files, pushes a branch, and opens a PR. It never auto-merges. If the diff does not apply to the configured target branch, publishing fails instead of guessing or force-pushing.
+
+### Verification tests
+
+Run the local automated tests with:
+
+```bash
+python -m compileall -q backend main.py tests
+python -m pytest -q
+```
+
+These tests validate application helpers and fail-closed behavior. A full runtime verification requires Docker and the built sandbox image. A frontend build requires installing `frontend/package-lock.json` dependencies first:
+
+```bash
+cd frontend
+npm ci
+npm run build
+```
