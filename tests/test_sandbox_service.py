@@ -1,3 +1,5 @@
+import subprocess
+
 from backend.services.sandbox_service import SandboxVerificationService
 
 
@@ -39,3 +41,31 @@ def test_assertion_failure_classification_rejects_setup_errors():
     assert SandboxVerificationService._is_assertion_failure("FAILED tests/test_x.py::test_x - AssertionError")
     assert not SandboxVerificationService._is_assertion_failure("ERROR collecting tests/test_x.py\nModuleNotFoundError")
     assert not SandboxVerificationService._is_assertion_failure("collected 0 items")
+
+
+def test_shared_sandbox_volume_mount_is_scoped_to_one_workspace(tmp_path, monkeypatch):
+    from backend.services import sandbox_service
+
+    volume_root = tmp_path / "shared-volume"
+    sandbox_parent = volume_root / "rca_sandbox_example"
+    workspace = sandbox_parent / "repo"
+    workspace.mkdir(parents=True)
+    monkeypatch.setattr(sandbox_service, "SANDBOX_VOLUME", "agentic-rca-sandbox-workspaces")
+    monkeypatch.setattr(sandbox_service, "SANDBOX_WORKDIR", str(volume_root))
+    monkeypatch.setattr(sandbox_service.shutil, "which", lambda _: "/usr/bin/docker")
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "1 passed", "")
+
+    monkeypatch.setattr(sandbox_service.subprocess, "run", run)
+    service = SandboxVerificationService()
+    result = service._run_pytest(workspace, None)
+
+    assert result["status"] == "completed"
+    assert "--network" in commands[0]
+    mount = commands[0][commands[0].index("--mount") + 1]
+    assert "source=agentic-rca-sandbox-workspaces" in mount
+    assert "volume-subpath=rca_sandbox_example" in mount
+    assert commands[0][commands[0].index("-w") + 1] == "/sandbox-workspaces/repo"

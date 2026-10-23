@@ -247,98 +247,68 @@ async def run_pipeline_task(incident_id: str):
             stage_started = time.perf_counter()
             last_stage = None
 
-            heartbeat_running = True
-
-            async def heartbeat():
-                while heartbeat_running:
-                    await asyncio.sleep(10)
-
-                    if not heartbeat_running:
-                        break
-
-                    await manager.broadcast(
-                        incident_id,
-                        {
-                            "event": "heartbeat",
-                            "current_stage": current_stage["name"],
-                            "progress_pct": current_stage["pct"],
-                            "log": (
-                                f"Still working on "
-                                f"{current_stage['name'].replace('_', ' ')}. "
-                                "Waiting for the current operation to return."
-                            ),
-                        },
-                    )
-
-            heartbeat_task = asyncio.create_task(heartbeat())
-
             final_state: dict = {}
 
-            try:
-                async for chunk in graph.astream(initial_state):
-                    for node_name, state_update in chunk.items():
-                        now = time.perf_counter()
-                        if last_stage is not None:
-                            stage_model = (final_state.get("reproduction_model") if last_stage == "reproduction" else final_state.get("patch_model") if last_stage == "patch_synthesizer" else None)
-                            stage_usage = final_state.get("model_usage", {})
-                            await metric(incident_id, last_stage, (now - stage_started) * 1000, "success",
-                                         model=stage_model, usage=stage_usage if isinstance(stage_usage, dict) else {})
-                        last_stage = node_name
-                        stage_started = now
-                        current_stage["name"] = node_name
-                        current_stage["pct"] = STAGE_PCT.get(
-                            node_name,
-                            0,
+            async for chunk in graph.astream(initial_state):
+                for node_name, state_update in chunk.items():
+                    now = time.perf_counter()
+                    if last_stage is not None:
+                        stage_model = (
+                            final_state.get("reproduction_model")
+                            if last_stage == "reproduction"
+                            else final_state.get("patch_model")
+                            if last_stage == "patch_synthesizer"
+                            else None
+                        )
+                        stage_usage = final_state.get("model_usage", {})
+                        await metric(
+                            incident_id,
+                            last_stage,
+                            (now - stage_started) * 1000,
+                            "success",
+                            model=stage_model,
+                            usage=stage_usage if isinstance(stage_usage, dict) else {},
+                        )
+                    last_stage = node_name
+                    stage_started = now
+                    current_stage["name"] = node_name
+                    current_stage["pct"] = STAGE_PCT.get(node_name, 0)
+
+                    final_state.update(state_update)
+
+                    if node_name in STAGE_STATUS:
+                        incident.status = STAGE_STATUS[node_name]
+                        await db.commit()
+
+                    for line in state_update.get("stage_logs", []):
+                        await manager.broadcast(
+                            incident_id,
+                            {
+                                "event": "log",
+                                "current_stage": node_name,
+                                "progress_pct": STAGE_PCT.get(node_name, 0),
+                                "log": line,
+                            },
                         )
 
-                        final_state.update(state_update)
-
-                        if node_name in STAGE_STATUS:
-                            incident.status = STAGE_STATUS[node_name]
-                            await db.commit()
-
-                        for line in state_update.get(
-                            "stage_logs",
-                            [],
-                        ):
-                            await manager.broadcast(
-                                incident_id,
-                                {
-                                    "event": "log",
-                                    "current_stage": node_name,
-                                    "progress_pct": STAGE_PCT.get(
-                                        node_name,
-                                        0,
-                                    ),
-                                    "log": line,
-                                },
-                            )
-
-                        if state_update.get("error"):
-                            await metric(incident_id, node_name, (time.perf_counter() - stage_started) * 1000, "failure")
-                            last_stage = None
-                            await manager.broadcast(
-                                incident_id,
-                                {
-                                    "event": "error",
-                                    "current_stage": node_name,
-                                    "progress_pct": STAGE_PCT.get(
-                                        node_name,
-                                        0,
-                                    ),
-                                    "log": state_update["error"],
-                                },
-                            )
-                            break
-
-            finally:
-                heartbeat_running = False
-                heartbeat_task.cancel()
-
-                try:
-                    await heartbeat_task
-                except asyncio.CancelledError:
-                    pass
+                    if state_update.get("error"):
+                        await metric(
+                            incident_id,
+                            node_name,
+                            (time.perf_counter() - stage_started) * 1000,
+                            "failure",
+                        )
+                        last_stage = None
+                        await manager.broadcast(
+                            incident_id,
+                            {
+                                "event": "error",
+                                "current_stage": node_name,
+                                "progress_pct": STAGE_PCT.get(node_name, 0),
+                                "log": state_update["error"],
+                            },
+                        )
+                        break
 
             if final_state.get("error"):
                 raise RuntimeError(final_state["error"])
@@ -486,7 +456,8 @@ async def run_pipeline_task(incident_id: str):
             if last_stage is not None:
                 await metric(incident_id, last_stage, (time.perf_counter() - stage_started) * 1000, "success",
                              model=(final_state.get("reproduction_model") if last_stage == "reproduction" else final_state.get("patch_model") if last_stage == "patch_synthesizer" else None),
-                             usage=final_state.get("model_usage", {}) if isinstance(final_state.get("model_usage", {}), dict) else {})
+                             usage=final_state.get("model_usage", {}) if isinstance(final_state.get("model_usage", {}), dict) else {},
+                             db=db)
 
             # A verified candidate is ready for human review; it is not resolved until merged/deployed.
             incident.status = IncidentStatus.patch_ready

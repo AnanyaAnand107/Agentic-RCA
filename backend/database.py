@@ -1,8 +1,9 @@
+import asyncio
 import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, Enum as SAEnum, Float, ForeignKey, JSON, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Enum as SAEnum, Float, ForeignKey, JSON, String, Text, event
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
@@ -113,13 +114,38 @@ class AgentMetric(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
-engine = create_async_engine(settings.database_url, echo=False)
+_is_sqlite = settings.database_url.startswith("sqlite")
+engine = create_async_engine(
+    settings.database_url,
+    echo=False,
+    connect_args={"timeout": 30} if _is_sqlite else {},
+)
 AsyncSessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+_db_initialized = False
+_db_initialization_lock = asyncio.Lock()
+
+
+if _is_sqlite:
+    @event.listens_for(engine.sync_engine, "connect")
+    def _configure_sqlite_connection(connection, _record):
+        cursor = connection.cursor()
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.close()
 
 
 async def init_db():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    global _db_initialized
+    if _db_initialized:
+        return
+    async with _db_initialization_lock:
+        if _db_initialized:
+            return
+        async with engine.connect() as conn:
+            if _is_sqlite:
+                await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
+            await conn.run_sync(Base.metadata.create_all)
+            await conn.commit()
+        _db_initialized = True
 
 
 async def ensure_db_ready():

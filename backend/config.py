@@ -6,14 +6,12 @@ class Settings(BaseSettings):
     hf_token: str = ""
     database_url: str = "sqlite+aiosqlite:///./rca_agent.db"
 
-    # Gemini: telemetry + repository reasoning
-    # gemini-2.5-flash is no longer available to new users.
-    gemini_model: str = "gemini-3.8-flash"
+    # Cost-efficient Gemini model for extraction and lightweight agent tasks.
+    gemini_model: str = "gemini-3.5-flash-lite"
 
-    # Hugging Face: code/test generation
-    # Prefer stable, broadly available Qwen checkpoints instead of a provider-specific 1M variant.
-    hf_code_model: str = "Qwen/Qwen2.5-Coder-32B-Instruct"
-    hf_analysis_model: str = "Qwen/Qwen2.5-Coder-32B-Instruct"
+    # Smaller Qwen checkpoints reduce inference cost while retaining instruction/code support.
+    hf_code_model: str = "Qwen/Qwen2.5-Coder-7B-Instruct"
+    hf_analysis_model: str = "Qwen/Qwen2.5-7B-Instruct"
     log_level: str = "INFO"
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 

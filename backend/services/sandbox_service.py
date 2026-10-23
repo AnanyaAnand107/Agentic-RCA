@@ -16,6 +16,8 @@ load_dotenv()
 from typing import Any
 
 DEFAULT_IMAGE = os.getenv("RCA_SANDBOX_IMAGE", "agentic-rca-sandbox:py311")
+SANDBOX_VOLUME = os.getenv("RCA_SANDBOX_VOLUME")
+SANDBOX_WORKDIR = os.getenv("RCA_SANDBOX_WORKDIR")
 EXCLUDED_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache"}
 
 
@@ -23,6 +25,8 @@ class SandboxVerificationService:
     def __init__(self, timeout_seconds: int = 120, image: str | None = None):
         self.timeout_seconds = max(5, int(timeout_seconds))
         self.image = image or DEFAULT_IMAGE
+        self.sandbox_volume = SANDBOX_VOLUME
+        self.sandbox_workdir = Path(SANDBOX_WORKDIR).resolve() if SANDBOX_WORKDIR else None
 
     def verify_patch(
         self,
@@ -46,8 +50,25 @@ class SandboxVerificationService:
             return self._failure("invalid_patch_format", "Expected a unified diff in diff_text, not complete source code.")
         if not shutil.which("docker"):
             return self._failure("sandbox_unavailable", "Docker executable is unavailable. Candidate code was not executed on the host.")
+        if bool(self.sandbox_volume) != bool(self.sandbox_workdir):
+            return self._failure(
+                "sandbox_setup_error",
+                "RCA_SANDBOX_VOLUME and RCA_SANDBOX_WORKDIR must be configured together.",
+            )
 
-        temp_parent = Path(tempfile.mkdtemp(prefix="rca_sandbox_"))
+        if self.sandbox_workdir:
+            try:
+                self.sandbox_workdir.mkdir(parents=True, exist_ok=True)
+                temp_parent = Path(
+                    tempfile.mkdtemp(prefix="rca_sandbox_", dir=self.sandbox_workdir)
+                )
+            except OSError as exc:
+                return self._failure(
+                    "sandbox_setup_error",
+                    f"Could not prepare the shared sandbox workspace: {exc}",
+                )
+        else:
+            temp_parent = Path(tempfile.mkdtemp(prefix="rca_sandbox_"))
         workspace = temp_parent / "repo"
         try:
             shutil.copytree(
@@ -135,9 +156,26 @@ class SandboxVerificationService:
             "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
             "--user", f"{uid}:{gid}",
             "-e", "PYTHONDONTWRITEBYTECODE=1", "-e", "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
-            "-v", f"{workspace.resolve()}:/workspace:rw", "-w", "/workspace",
-            self.image, "python", "-m", "pytest", "-q",
         ]
+        if self.sandbox_volume and self.sandbox_workdir:
+            relative_parent = workspace.parent.relative_to(self.sandbox_workdir).as_posix()
+            container_workspace = PurePosixPath("/sandbox-workspaces") / workspace.name
+            args.extend(
+                [
+                    "--mount",
+                    (
+                        "type=volume,"
+                        f"source={self.sandbox_volume},"
+                        "target=/sandbox-workspaces,"
+                        f"volume-subpath={relative_parent}"
+                    ),
+                    "-w",
+                    str(container_workspace),
+                ]
+            )
+        else:
+            args.extend(["-v", f"{workspace.resolve()}:/workspace:rw", "-w", "/workspace"])
+        args.extend([self.image, "python", "-m", "pytest", "-q"])
         if target:
             args.append(target)
         try:

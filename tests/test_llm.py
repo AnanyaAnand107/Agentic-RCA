@@ -104,3 +104,33 @@ def test_generate_validated_retries_transient_provider_failure(
     assert gemini_calls == 2
     assert provider == "gemini"
     assert json.loads(text)["patched_code"]
+
+
+def test_generate_does_not_retry_exhausted_provider_quota(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    gemini_calls = 0
+    expected = json.dumps({"analysis": "Fallback used.", "evidence": []})
+
+    def exhausted_gemini(prompt: str, *, temperature: float = 0.0) -> str:
+        nonlocal gemini_calls
+        gemini_calls += 1
+        raise RuntimeError("429 RESOURCE_EXHAUSTED: quota exceeded")
+
+    def fallback_hf(
+        prompt: str,
+        *,
+        model: str,
+        temperature: float = 0.1,
+        max_tokens: int = 5000,
+    ) -> str:
+        return expected
+
+    monkeypatch.setattr(llm, "_gemini", exhausted_gemini)
+    monkeypatch.setattr(llm, "_hf", fallback_hf)
+
+    text, provider = llm.generate("telemetry", "parse the incident")
+
+    assert gemini_calls == 1
+    assert provider == "huggingface"
+    assert json.loads(text)["analysis"] == "Fallback used."

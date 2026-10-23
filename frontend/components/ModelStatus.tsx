@@ -13,6 +13,10 @@ export function ModelStatus({ health }: { health: Health | null }) {
         label="Analysis service"
         value={health.models.gemini_configured ? "Ready" : "Not configured"}
         ready={health.models.gemini_configured}
+        details={[`Gemini: ${health.models.gemini_model}`]}
+        description={
+          health.models.gemini_configured ? "Available" : "Check configuration"
+        }
       />
 
       <StatusCard
@@ -22,6 +26,13 @@ export function ModelStatus({ health }: { health: Health | null }) {
           health.models.huggingface_configured ? "Ready" : "Not configured"
         }
         ready={health.models.huggingface_configured}
+        details={[
+          `Analysis: ${health.models.hf_analysis_model}`,
+          `Code generation: ${health.models.hf_code_model}`,
+        ]}
+        description={
+          health.models.huggingface_configured ? "Available" : "Check configuration"
+        }
       />
 
       <StatusCard
@@ -29,7 +40,6 @@ export function ModelStatus({ health }: { health: Health | null }) {
         label="Runtime verification"
         value={health.sandbox_enabled ? "Enabled" : "Deferred"}
         ready={health.sandbox_enabled}
-        warning={!health.sandbox_enabled}
       />
     </section>
   );
@@ -40,13 +50,15 @@ function StatusCard({
   label,
   value,
   ready,
-  warning,
+  description,
+  details,
 }: {
   icon: React.ReactNode;
   label: string;
   value: string;
   ready: boolean;
-  warning?: boolean;
+  description?: string;
+  details?: string[];
 }) {
   return (
     <div className="rounded-2xl border border-white/[.08] bg-[#0f1014] p-5">
@@ -57,21 +69,21 @@ function StatusCard({
 
       <div className="mt-3 text-base font-semibold text-zinc-200">{value}</div>
 
-      <div
-        className={`mt-2 text-sm ${
-          warning
-            ? "text-amber-300"
-            : ready
-              ? "text-emerald-300"
-              : "text-red-300"
-        }`}
-      >
-        {warning
-          ? "Available after isolated execution is added"
-          : ready
-            ? "Available"
-            : "Check configuration"}
-      </div>
+      {details?.map((detail) => (
+        <div key={detail} className="mt-2 break-all text-xs text-zinc-400">
+          {detail}
+        </div>
+      ))}
+
+      {description && (
+        <div
+          className={`mt-3 text-sm ${
+            ready ? "text-emerald-300" : "text-red-300"
+          }`}
+        >
+          {description}
+        </div>
+      )}
     </div>
   );
 }

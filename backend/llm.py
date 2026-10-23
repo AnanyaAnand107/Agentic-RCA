@@ -196,8 +196,18 @@ def _generate(
                     validator(text)
                 return text, provider
             except Exception as exc:
-                is_transient = any(
-                    marker in str(exc).lower()
+                error_text = str(exc).lower()
+                is_quota_exhaustion = any(
+                    marker in error_text
+                    for marker in (
+                        "quota exceeded",
+                        "resource_exhausted",
+                        "no remaining credits",
+                        "payment required",
+                    )
+                )
+                is_transient = not is_quota_exhaustion and any(
+                    marker in error_text
                     for marker in (
                         "429",
                         "502",

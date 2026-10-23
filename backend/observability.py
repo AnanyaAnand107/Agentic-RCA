@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import AgentMetric, AuditEvent, AsyncSessionLocal, ensure_db_ready
 
@@ -37,12 +38,17 @@ async def audit(action: str, incident_id: str | None = None, details: dict | Non
 
 
 async def metric(incident_id: str, agent: str, duration_ms: float, outcome: str,
-                 model: str | None = None, usage: dict | None = None):
+                 model: str | None = None, usage: dict | None = None,
+                 db: AsyncSession | None = None):
     await ensure_db_ready()
+    record = AgentMetric(incident_id=incident_id, agent=agent,
+                         duration_ms=max(0, duration_ms), outcome=outcome,
+                         model=model, usage=usage or {})
+    if db is not None:
+        db.add(record)
+        return
     async with AsyncSessionLocal() as db:
-        db.add(AgentMetric(incident_id=incident_id, agent=agent,
-                           duration_ms=max(0, duration_ms), outcome=outcome,
-                           model=model, usage=usage or {}))
+        db.add(record)
         await db.commit()
 
 

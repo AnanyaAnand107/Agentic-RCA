@@ -56,7 +56,6 @@ export type Report = {
   pr_url?: string | null;
   pr_status?: string | null;
   pr_error?: string | null;
-  pr_error?: string | null;
   root_cause_explanation?: string | null;
   forensic_analysis?: string | null;
   forensic_evidence: string[];

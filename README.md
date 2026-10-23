@@ -18,35 +18,73 @@ Pre-isolation Verification
 
 ### Model routing
 
-- **Gemini**: telemetry extraction and evidence-grounded repository reasoning.
-- **Hugging Face coding model**: pytest reproduction and candidate patch generation.
+- **Gemini 3.5 Flash-Lite**: lower-cost telemetry extraction and repository reasoning.
+- **Qwen2.5 7B / Qwen2.5-Coder 7B**: lower-compute analysis, pytest reproduction,
+  and candidate patch generation through Hugging Face.
 - Providers automatically fall back to the other configured provider when possible.
+
+These smaller models preserve the same task interfaces, but may produce less reliable
+results than the previous 32B coding model. Smaller checkpoints can reduce per-request
+cost; they do not provide free inference or restore exhausted provider quotas. Hard
+quota-exhaustion responses are not retried, avoiding redundant requests.
 
 True fine-tuning is not claimed by this repository. A real task-specific fine-tune requires a curated incident/patch/test dataset and training/evaluation procedure. The current implementation uses task-specific prompts, strict output contracts, source/evidence grounding, AST validation, and a model repair pass.
 
 ## Important verification boundary
 
-Sandbox execution is intentionally **not implemented yet**.
+Isolated Docker verification is implemented but requires Docker and the trusted
+`agentic-rca-sandbox:py311` image. When available, it checks that the generated
+reproduction fails before the candidate patch, passes after it, and the repository's
+full pytest suite passes. The patch is applied only to a disposable repository copy;
+if Docker or the image is unavailable, the candidate remains unverified.
 
-The current verification stage:
+## Run with Docker Compose
 
-- validates generated Python syntax;
-- checks for dangerous generated constructs;
-- confirms the original incident can be reproduced when the reproduction agent succeeds;
-- does **not** apply the candidate patch to the uploaded repository;
-- does **not** claim that the patch fixes the production failure.
+Docker Desktop (Windows/macOS) or Docker Engine with the Compose plugin is required.
+From the project root, create the local environment file and add provider credentials:
 
-Runtime patch verification can be added later using an isolated sandbox/container/worktree.
+```powershell
+Copy-Item .env.example .env
+# Edit .env and set GOOGLE_API_KEY and/or HF_TOKEN
+docker compose up --build
+```
 
-## Backend
+Open `http://localhost:3000`; the API is at `http://localhost:8000` and Swagger at
+`http://localhost:8000/docs`. Stop the stack with `Ctrl+C`, then run
+`docker compose down` to remove its containers. Named database and sandbox-workspace
+volumes are retained; `docker compose down -v` also deletes that persisted data.
+
+To build the isolated verification image, run this in another terminal:
+
+```powershell
+docker compose --profile tools build sandbox
+```
+
+The standard Compose setup runs the app without mounting the host Docker socket.
+Candidate patch verification therefore stays unavailable until you explicitly opt in:
+
+```powershell
+# Stop the regular stack with Ctrl+C, then restart with sandbox access:
+docker compose -f docker-compose.yml -f docker-compose.sandbox.yml up --build --force-recreate
+```
+
+The sandbox override gives the backend access to the host Docker daemon, which is
+effectively host-level administrative access. Use it only for a trusted, local demo;
+the API is bound to localhost, but do not expose it to an untrusted network. The
+verification container itself runs with networking disabled, a read-only root
+filesystem, a non-root user, and resource limits. Generated patches are never
+applied to the original repository. The sandbox workspace volume must be mounted
+with Docker's `volume-subpath` support so each verification container sees only its
+own temporary repository copy.
+
+## Run the backend locally
 
 ```bash
-cd backend-project
 python -m venv .venv
 # Windows
 .venv\\Scripts\\activate
 pip install -r requirements.txt
-copy .env.example .env
+# Windows PowerShell: Copy-Item .env.example .env
 python main.py
 ```
 
@@ -55,6 +93,8 @@ Swagger: `http://127.0.0.1:8000/docs`
 Health: `http://127.0.0.1:8000/api/health`
 
 Configure at least one model provider in `.env`. For the intended routing, configure both `GOOGLE_API_KEY` and `HF_TOKEN`.
+The recommended lower-cost defaults are `gemini-3.5-flash-lite`,
+`Qwen/Qwen2.5-Coder-7B-Instruct`, and `Qwen/Qwen2.5-7B-Instruct`.
 
 ## Next.js frontend
 
@@ -89,9 +129,9 @@ Removed prototype/utility artifacts that were not part of the production RCA wor
 
 Runtime verification is fail-closed: the backend never falls back to executing candidate code on the host. A patch is marked verified only when the generated reproduction test fails by assertion before the patch, passes after the patch, and the complete pytest regression suite passes in Docker.
 
-### Build the sandbox image
+### Build the sandbox image manually
 
-Build this image from the project root in a trusted environment with internet access for dependency installation:
+Alternatively, build the image directly from the project root:
 
 ```bash
 docker build -f backend/services/sandbox.Dockerfile -t agentic-rca-sandbox:py311 .
