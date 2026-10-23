@@ -4,6 +4,8 @@
 !.env.example
 !.env.*.example
 
+workspaces/
+
 # Python
 __pycache__/
 *.py[cod]
